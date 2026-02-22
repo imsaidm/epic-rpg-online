@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>⚔️ Epic RPG</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <!-- ═══ AUTH SCREEN ═══ -->
+    <div id="auth-screen">
+        <div class="auth-container">
+            <h1>⚔️ EPIC RPG</h1>
+            <p class="subtitle">A Multiplayer Browser RPG</p>
+            <div class="auth-tabs">
+                <button class="auth-tab active" onclick="switchAuthTab('login')">LOGIN</button>
+                <button class="auth-tab" onclick="switchAuthTab('register')">REGISTER</button>
+            </div>
+            <div id="login-form">
+                <input class="auth-input" type="text" id="login-user" placeholder="Username" autocomplete="username">
+                <input class="auth-input" type="password" id="login-pass" placeholder="Password" autocomplete="current-password">
+                <button class="auth-btn" onclick="doLogin()">⚔️ ENTER GAME</button>
+            </div>
+            <div id="register-form" style="display:none">
+                <input class="auth-input" type="text" id="reg-user" placeholder="Username (3-20 chars)" autocomplete="username">
+                <input class="auth-input" type="password" id="reg-pass" placeholder="Password (4+ chars)" autocomplete="new-password">
+                <button class="auth-btn" onclick="doRegister()">📜 CREATE ACCOUNT</button>
+            </div>
+            <div class="auth-error" id="auth-error"></div>
+        </div>
+    </div>
+
+    <!-- ═══ CHARACTER CREATION SCREEN ═══ -->
+    <div id="create-screen">
+        <div class="create-container">
+            <h2>🛡️ CREATE YOUR HERO</h2>
+            <input class="auth-input" type="text" id="char-name" placeholder="Character Name" maxlength="20">
+            <div class="class-select">
+                <div class="class-card" onclick="selectClass('Warrior')" data-class="Warrior">
+                    <span class="class-icon">⚔️</span>
+                    <span class="class-name">WARRIOR</span>
+                    <span class="class-stats">HP: 120<br>ATK: 12<br>DEF: 8</span>
+                </div>
+                <div class="class-card" onclick="selectClass('Mage')" data-class="Mage">
+                    <span class="class-icon">🧙</span>
+                    <span class="class-name">MAGE</span>
+                    <span class="class-stats">HP: 80<br>ATK: 15<br>DEF: 4</span>
+                </div>
+                <div class="class-card" onclick="selectClass('Archer')" data-class="Archer">
+                    <span class="class-icon">🏹</span>
+                    <span class="class-name">ARCHER</span>
+                    <span class="class-stats">HP: 90<br>ATK: 13<br>DEF: 5</span>
+                </div>
+            </div>
+            <button class="auth-btn" onclick="createCharacter()">✨ CREATE CHARACTER</button>
+            <div class="auth-error" id="create-error"></div>
+        </div>
+    </div>
+
+    <!-- ═══ GAME SCREEN ═══ -->
+    <div id="game-screen">
+        <!-- Top Navigation -->
+        <div class="top-nav">
+            <button class="nav-tab active" data-panel="hunt" onclick="switchPanel('hunt')">⚔️ Hunt</button>
+            <button class="nav-tab" data-panel="adventure" onclick="switchPanel('adventure')">🏰 Adventure</button>
+            <button class="nav-tab" data-panel="shop" onclick="switchPanel('shop')">🛒 Shop</button>
+            <button class="nav-tab" data-panel="inventory" onclick="switchPanel('inventory')">🎒 Inventory</button>
+            <button class="nav-tab" data-panel="craft" onclick="switchPanel('craft')">🔨 Craft</button>
+            <button class="nav-tab" data-panel="pvp" onclick="switchPanel('pvp')">⚡ PvP</button>
+            <div class="nav-right">
+                <span class="player-name" id="nav-player-name"></span>
+                <button class="btn-rest" onclick="doRest()">💤 Rest</button>
+                <button class="btn-logout" onclick="doLogout()">🚪 Logout</button>
+            </div>
+        </div>
+
+        <div class="game-body">
+            <!-- Left Sidebar: Character Stats -->
+            <div class="sidebar-left">
+                <div class="char-portrait">
+                    <span class="portrait-icon" id="portrait-icon">⚔️</span>
+                    <div class="char-name-display" id="char-name-display"></div>
+                    <div class="char-class-display" id="char-class-display"></div>
+                    <div class="char-level-display" id="char-level-display"></div>
+                </div>
+                <div class="stat-group">
+                    <h3>Health</h3>
+                    <div class="stat-bar">
+                        <div class="bar-label">
+                            <span>HP</span>
+                            <span id="hp-text">100/100</span>
+                        </div>
+                        <div class="bar-track"><div class="bar-fill hp" id="hp-bar" style="width:100%"></div></div>
+                    </div>
+                    <div class="stat-bar">
+                        <div class="bar-label">
+                            <span>XP</span>
+                            <span id="xp-text">0/50</span>
+                        </div>
+                        <div class="bar-track"><div class="bar-fill xp" id="xp-bar" style="width:0%"></div></div>
+                    </div>
+                </div>
+                <div class="stat-group">
+                    <h3>Stats</h3>
+                    <div class="stat-line"><span>⚔️ ATK</span><span class="stat-val" id="stat-atk">10</span></div>
+                    <div class="stat-line"><span>🛡️ DEF</span><span class="stat-val" id="stat-def">5</span></div>
+                    <div class="stat-line"><span>💰 Gold</span><span class="stat-val" id="stat-gold">50</span></div>
+                </div>
+            </div>
+
+            <!-- Center: Game Panels -->
+            <div class="main-content">
+                <!-- HUNT PANEL -->
+                <div class="game-panel active" id="panel-hunt">
+                    <h2 class="panel-title">⚔️ HUNT</h2>
+                    <div class="hunt-area">
+                        <p style="color:var(--text-dim);font-size:9px;margin-bottom:20px;">
+                            Venture into the wilds and battle monsters for XP, Gold, and loot!
+                        </p>
+                        <button class="hunt-btn" id="hunt-btn" onclick="doHunt()">🗡️ GO HUNTING!</button>
+                    </div>
+                    <div class="battle-display" id="battle-display">
+                        <div class="battle-header">
+                            <div class="battle-entity">
+                                <div class="entity-icon" id="player-battle-icon">⚔️</div>
+                                <div class="entity-name" id="player-battle-name">You</div>
+                                <div class="entity-hp-bar"><div class="hp-fill" id="player-hp-fill" style="width:100%"></div></div>
+                            </div>
+                            <div class="battle-vs">⚡ VS ⚡</div>
+                            <div class="battle-entity">
+                                <div class="entity-icon" id="monster-battle-icon">👹</div>
+                                <div class="entity-name" id="monster-battle-name">Monster</div>
+                                <div class="entity-hp-bar"><div class="hp-fill" id="monster-hp-fill" style="width:100%"></div></div>
+                            </div>
+                        </div>
+                        <div class="battle-log" id="battle-log"></div>
+                        <div class="battle-result" id="battle-result" style="display:none"></div>
+                    </div>
+                </div>
+
+                <!-- ADVENTURE PANEL -->
+                <div class="game-panel" id="panel-adventure">
+                    <h2 class="panel-title">🏰 ADVENTURE / DUNGEON</h2>
+                    <p style="color:var(--text-dim);font-size:8px;margin-bottom:16px;">
+                        Enter dangerous dungeons to fight waves of monsters and powerful bosses!
+                    </p>
+                    <div class="dungeon-grid" id="dungeon-grid"></div>
+                    <div class="battle-display" id="dungeon-battle-display">
+                        <div class="battle-header">
+                            <div class="battle-entity">
+                                <div class="entity-icon" id="dg-player-icon">⚔️</div>
+                                <div class="entity-name" id="dg-player-name">You</div>
+                                <div class="entity-hp-bar"><div class="hp-fill" id="dg-player-hp" style="width:100%"></div></div>
+                            </div>
+                            <div class="battle-vs">⚡ VS ⚡</div>
+                            <div class="battle-entity">
+                                <div class="entity-icon">👹</div>
+                                <div class="entity-name" id="dg-boss-name">Boss</div>
+                                <div class="entity-hp-bar"><div class="hp-fill" id="dg-boss-hp" style="width:100%"></div></div>
+                            </div>
+                        </div>
+                        <div class="battle-log" id="dungeon-log"></div>
+                        <div class="battle-result" id="dungeon-result" style="display:none"></div>
+                    </div>
+                </div>
+
+                <!-- SHOP PANEL -->
+                <div class="game-panel" id="panel-shop">
+                    <h2 class="panel-title">🛒 SHOP</h2>
+                    <div class="filter-tabs" id="shop-filters">
+                        <button class="filter-tab active" onclick="filterShop('all')">All</button>
+                        <button class="filter-tab" onclick="filterShop('weapon')">⚔️ Weapons</button>
+                        <button class="filter-tab" onclick="filterShop('armor')">🛡️ Armor</button>
+                        <button class="filter-tab" onclick="filterShop('potion')">🧪 Potions</button>
+                    </div>
+                    <div class="shop-grid" id="shop-grid"></div>
+                </div>
+
+                <!-- INVENTORY PANEL -->
+                <div class="game-panel" id="panel-inventory">
+                    <h2 class="panel-title">🎒 INVENTORY</h2>
+                    <div class="inv-grid" id="inv-grid"></div>
+                </div>
+
+                <!-- CRAFT PANEL -->
+                <div class="game-panel" id="panel-craft">
+                    <h2 class="panel-title">🔨 CRAFTING</h2>
+                    <p style="color:var(--text-dim);font-size:8px;margin-bottom:16px;">
+                        Combine materials and items to forge powerful gear!
+                    </p>
+                    <div class="recipe-grid" id="recipe-grid"></div>
+                </div>
+
+                <!-- PVP PANEL -->
+                <div class="game-panel" id="panel-pvp">
+                    <h2 class="panel-title">⚡ PvP ARENA</h2>
+                    <p style="color:var(--text-dim);font-size:8px;margin-bottom:16px;">
+                        Challenge other online players to a duel! Winner takes gold.
+                    </p>
+                    <div class="pvp-player-list" id="pvp-list"></div>
+                    <div class="battle-display" id="pvp-battle-display">
+                        <div class="battle-log" id="pvp-log"></div>
+                        <div class="battle-result" id="pvp-result" style="display:none"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Sidebar: Online Players + Chat -->
+            <div class="sidebar-right">
+                <div class="online-panel">
+                    <h3>🟢 ONLINE (<span id="online-count">0</span>)</h3>
+                    <div id="online-list"></div>
+                </div>
+                <div class="chat-panel">
+                    <h3>💬 CHAT</h3>
+                    <div class="chat-messages" id="chat-messages"></div>
+                    <div class="chat-input-area">
+                        <input class="chat-input" type="text" id="chat-input" placeholder="Type..." maxlength="200">
+                        <button class="chat-send" onclick="sendChat()">►</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/game.js"></script>
+</body>
+</html>
