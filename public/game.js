@@ -199,6 +199,8 @@ async function enterGame() {
     loadShop();
     loadDungeons();
     loadRecipes();
+    loadQuests();
+    checkTutorial();
 
     // Auto-start BGM when entering game
     if (!bgmStarted) {
@@ -279,6 +281,7 @@ function switchPanel(panel) {
     if (panel === 'pvp') updatePvPList();
     if (panel === 'adventure') loadDungeons();
     if (panel === 'stats') loadStats();
+    if (panel === 'quests') loadQuests();
 }
 
 // ─── BATTLE ANIMATION HELPERS ───
@@ -553,6 +556,9 @@ async function doHunt() {
 
     // Hunt cooldown (3 seconds)
     startHuntCooldown();
+
+    // Refresh quests after hunt
+    loadQuests();
 }
 
 function startHuntCooldown() {
@@ -657,7 +663,7 @@ async function loadInventory() {
                     `<button class="btn btn-sm btn-primary" onclick="equipItem(${item.inv_id})">${item.equipped ? 'UNEQUIP' : 'EQUIP'}</button>` : ''}
                 ${item.type === 'potion' ?
                     `<button class="btn btn-sm btn-success" onclick="useItem(${item.inv_id})">USE</button>` : ''}
-                <button class="btn btn-sm btn-danger" onclick="sellItem(${item.inv_id})">SELL (${Math.floor(item.price * 0.5)}G)</button>
+                <button class="btn btn-sm btn-danger" onclick="sellItem(${item.inv_id}, '${item.name.replace(/'/g, "\\'")}', ${Math.floor(item.price * 0.5)})">SELL (${Math.floor(item.price * 0.5)}G)</button>
             </div>
         </div>
     `).join('');
@@ -684,7 +690,9 @@ async function useItem(invId) {
     loadInventory();
 }
 
-async function sellItem(invId) {
+async function sellItem(invId, itemName, sellPrice) {
+    // FIX #5: Confirm before selling
+    if (!confirm('Sell ' + (itemName || 'this item') + ' for ' + (sellPrice || '?') + ' gold?')) return;
     const data = await api('/api/shop/sell', { method: 'POST', body: { invId } });
     if (data.error) { toast(data.error, 'error'); return; }
     AudioEngine.sfxShop();
@@ -1148,6 +1156,116 @@ document.addEventListener('keydown', (e) => {
         }
     }
 });
+
+// ─── QUEST / DAILY MISSIONS ───
+async function loadQuests() {
+    var data = await api('/api/quests');
+    if (data.error) return;
+    var container = $('quest-container');
+    if (!container) return;
+
+    if (data.length === 0) {
+        container.innerHTML = '<p style="color:var(--text-dim);font-size:8px;">No quests available.</p>';
+        return;
+    }
+
+    var html = '';
+    for (var i = 0; i < data.length; i++) {
+        var q = data[i];
+        var pct = Math.min(100, Math.floor((q.current_count / q.target_count) * 100));
+        var statusCls = q.claimed ? 'quest-claimed' : q.completed ? 'quest-done' : 'quest-active';
+        var icon = q.quest_type === 'hunt' ? '🗡️' : q.quest_type === 'pvp_win' ? '⚡' : '🏰';
+        html += '<div class="quest-card ' + statusCls + '">';
+        html += '<div class="quest-header">' + icon + ' ' + escapeHtml(q.quest_desc) + '</div>';
+        html += '<div class="quest-progress-bar"><div class="quest-progress-fill" style="width:' + pct + '%"></div></div>';
+        html += '<div class="quest-info">' + q.current_count + '/' + q.target_count + ' | 🏆 ' + q.reward_xp + ' XP + ' + q.reward_gold + ' Gold</div>';
+        if (q.completed && !q.claimed) {
+            html += '<button class="btn btn-sm btn-success" onclick="claimQuest(' + q.id + ')">🎁 CLAIM</button>';
+        } else if (q.claimed) {
+            html += '<span class="quest-badge-claimed">✅ Claimed</span>';
+        }
+        html += '</div>';
+    }
+    container.innerHTML = html;
+}
+
+async function claimQuest(questId) {
+    var data = await api('/api/quests/claim', { method: 'POST', body: { questId: questId } });
+    if (data.error) { toast(data.error, 'error'); return; }
+    AudioEngine.sfxGold();
+    toast(data.message, 'gold');
+    if (data.levelUps && data.levelUps.length > 0) {
+        AudioEngine.sfxLevelUp();
+        for (var i = 0; i < data.levelUps.length; i++) {
+            toast('⭐ LEVEL UP! Lv.' + data.levelUps[i].level + '!', 'success');
+        }
+    }
+    currentChar = data.character;
+    updateCharDisplay();
+    loadQuests();
+}
+
+// ─── TUTORIAL / ONBOARDING ───
+var tutorialSteps = [
+    { title: '👋 Welcome, Adventurer!', text: 'Welcome to Epic RPG! Here are some tips to get you started.' },
+    { title: '⚔️ Hunting', text: 'Click the Hunt tab to battle monsters. Defeat them for XP, Gold, and loot drops!' },
+    { title: '🏰 Dungeons', text: 'Enter dungeons in the Adventure tab for tougher fights and better rewards.' },
+    { title: '🎒 Inventory', text: 'Equip weapons and armor to boost your stats. Use potions to heal or gain buffs.' },
+    { title: '🛒 Shop & Craft', text: 'Buy items from the Shop or craft powerful gear from materials you find.' },
+    { title: '⚡ PvP', text: 'Challenge other online players in the PvP Arena. Winner takes gold!' },
+    { title: '🎁 Daily Rewards', text: 'Claim your daily reward and complete daily quests for bonus XP and Gold!' },
+    { title: '🚀 Go Adventure!', text: 'You are ready! Start by hunting some monsters. Good luck!' }
+];
+var tutorialStep = 0;
+
+async function checkTutorial() {
+    var data = await api('/api/tutorial/status');
+    if (data.error || data.tutorialSeen) return;
+    showTutorial();
+}
+
+function showTutorial() {
+    tutorialStep = 0;
+    var overlay = document.createElement('div');
+    overlay.id = 'tutorial-overlay';
+    overlay.className = 'tutorial-overlay';
+    renderTutorialStep(overlay);
+    document.body.appendChild(overlay);
+}
+
+function renderTutorialStep(overlay) {
+    if (!overlay) overlay = $('tutorial-overlay');
+    if (!overlay) return;
+    var step = tutorialSteps[tutorialStep];
+    var isLast = tutorialStep === tutorialSteps.length - 1;
+    overlay.innerHTML = '<div class="tutorial-card">' +
+        '<div class="tutorial-step-indicator">' + (tutorialStep + 1) + '/' + tutorialSteps.length + '</div>' +
+        '<h3 class="tutorial-title">' + step.title + '</h3>' +
+        '<p class="tutorial-text">' + step.text + '</p>' +
+        '<div class="tutorial-actions">' +
+        (tutorialStep > 0 ? '<button class="btn btn-sm btn-primary" onclick="tutorialPrev()">◀ Back</button>' : '') +
+        '<button class="btn btn-sm ' + (isLast ? 'btn-success' : 'btn-primary') + '" onclick="' + (isLast ? 'tutorialDone()' : 'tutorialNext()') + '">' + (isLast ? '✅ Got it!' : 'Next ▶') + '</button>' +
+        '</div>' +
+        '<button class="tutorial-skip" onclick="tutorialDone()">Skip tutorial</button>' +
+        '</div>';
+}
+
+function tutorialNext() {
+    tutorialStep++;
+    if (tutorialStep >= tutorialSteps.length) { tutorialDone(); return; }
+    renderTutorialStep();
+}
+
+function tutorialPrev() {
+    if (tutorialStep > 0) tutorialStep--;
+    renderTutorialStep();
+}
+
+async function tutorialDone() {
+    var overlay = $('tutorial-overlay');
+    if (overlay) overlay.remove();
+    await api('/api/tutorial/complete', { method: 'POST' });
+}
 
 // ─── INIT ───
 checkSession();
