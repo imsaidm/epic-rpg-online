@@ -70,9 +70,16 @@
             <button class="nav-tab" data-panel="inventory" onclick="switchPanel('inventory')">🎒 Inventory</button>
             <button class="nav-tab" data-panel="craft" onclick="switchPanel('craft')">🔨 Craft</button>
             <button class="nav-tab" data-panel="pvp" onclick="switchPanel('pvp')">⚡ PvP</button>
+            <button class="nav-tab" data-panel="stats" onclick="switchPanel('stats')">📊 Stats</button>
             <div class="nav-right">
+                <div class="audio-controls">
+                    <button class="btn-audio" id="btn-mute" onclick="toggleGameMute()" title="Toggle Sound">🔊</button>
+                    <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="30" title="Volume" oninput="setGameVolume(this.value)">
+                    <button class="btn-audio" id="btn-bgm" onclick="toggleBGM()" title="Toggle Music">🎵</button>
+                </div>
                 <span class="player-name" id="nav-player-name"></span>
-                <button class="btn-rest" onclick="doRest()">💤 Rest</button>
+                <button class="btn-daily" id="btn-daily" onclick="claimDaily()">🎁 Daily</button>
+                <button class="btn-rest" id="btn-rest" onclick="doRest()">💤 Rest</button>
                 <button class="btn-logout" onclick="doLogout()">🚪 Logout</button>
             </div>
         </div>
@@ -108,6 +115,10 @@
                     <div class="stat-line"><span>⚔️ ATK</span><span class="stat-val" id="stat-atk">10</span></div>
                     <div class="stat-line"><span>🛡️ DEF</span><span class="stat-val" id="stat-def">5</span></div>
                     <div class="stat-line"><span>💰 Gold</span><span class="stat-val" id="stat-gold">50</span></div>
+                </div>
+                <!-- FIX #2: Active buffs display -->
+                <div class="stat-group" id="active-buffs-display" style="display:none">
+                    <h3>🔥 Active Buffs</h3>
                 </div>
             </div>
 
@@ -157,7 +168,7 @@
                             </div>
                             <div class="battle-vs">⚡ VS ⚡</div>
                             <div class="battle-entity">
-                                <div class="entity-icon">👹</div>
+                                <div class="entity-icon" id="dg-boss-icon">👹</div>
                                 <div class="entity-name" id="dg-boss-name">Boss</div>
                                 <div class="entity-hp-bar"><div class="hp-fill" id="dg-boss-hp" style="width:100%"></div></div>
                             </div>
@@ -206,6 +217,14 @@
                         <div class="battle-result" id="pvp-result" style="display:none"></div>
                     </div>
                 </div>
+
+                <!-- STATS PANEL -->
+                <div class="game-panel" id="panel-stats">
+                    <h2 class="panel-title">📊 PLAYER STATS</h2>
+                    <div class="stats-container" id="stats-container">
+                        <p style="color:var(--text-dim);font-size:9px;">Loading stats...</p>
+                    </div>
+                </div>
             </div>
 
             <!-- Right Sidebar: Online Players + Chat -->
@@ -227,6 +246,7 @@
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
+    <script src="/audio.js"></script>
     <script src="/game.js"></script>
 </body>
 </html>

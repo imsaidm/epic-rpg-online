@@ -93,6 +93,16 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     FOREIGN KEY (character_id) REFERENCES characters(id)
 );
 
+-- Player stats table (kill counters, totals)
+CREATE TABLE IF NOT EXISTS player_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL,
+    monster_name TEXT NOT NULL,
+    kill_count INTEGER DEFAULT 0,
+    UNIQUE(character_id, monster_name),
+    FOREIGN KEY (character_id) REFERENCES characters(id)
+);
+
 -- ===================== SAMPLE DATA =====================
 
 -- Items: Weapons (type='weapon')

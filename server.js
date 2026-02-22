@@ -6,13 +6,27 @@ const crypto = require('crypto');
 const path = require('path');
 const Database = require('better-sqlite3');
 const fs = require('fs');
+const bcrypt = require('bcryptjs');
 
 // ─── App Setup ───
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const SESSION_SECRET = 'epic-rpg-secret-key-' + crypto.randomBytes(8).toString('hex');
+// FIX #7: Session secret - use env var, fallback to persistent file-based secret
+function getSessionSecret() {
+    if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+    const secretFile = path.join(__dirname, '.session-secret');
+    try {
+        const existing = fs.readFileSync(secretFile, 'utf8').trim();
+        if (existing) return existing;
+    } catch (e) { /* file doesn't exist yet */ }
+    const newSecret = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(secretFile, newSecret, 'utf8');
+    return newSecret;
+}
+
+const SESSION_SECRET = getSessionSecret();
 const sessionMiddleware = session({
     secret: SESSION_SECRET,
     resave: false,
@@ -38,11 +52,91 @@ db.pragma('foreign_keys = ON');
 const initSQL = fs.readFileSync(path.join(__dirname, 'db', 'init.sql'), 'utf8');
 db.exec(initSQL);
 
+// ALTER TABLE: add daily reward columns (IF NOT EXISTS pattern via pragma)
+try {
+    db.prepare("SELECT last_daily FROM characters LIMIT 1").get();
+} catch (e) {
+    db.exec("ALTER TABLE characters ADD COLUMN last_daily TEXT DEFAULT NULL");
+    db.exec("ALTER TABLE characters ADD COLUMN daily_streak INTEGER DEFAULT 0");
+}
+
+// ALTER TABLE: add total_gold_earned to characters
+try {
+    db.prepare("SELECT total_gold_earned FROM characters LIMIT 1").get();
+} catch (e) {
+    db.exec("ALTER TABLE characters ADD COLUMN total_gold_earned INTEGER DEFAULT 0");
+}
+
+// FIX #2: Create active_buffs table for temporary buff system
+db.exec(`
+    CREATE TABLE IF NOT EXISTS active_buffs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id INTEGER NOT NULL,
+        buff_type TEXT NOT NULL,
+        value INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (character_id) REFERENCES characters(id)
+    )
+`);
+
 console.log('✅ Database initialized');
 
+// ─── FIX #6: Rate Limiter ───
+const rateLimits = new Map(); // key -> { lastAction: timestamp }
+
+function checkRateLimit(key, cooldownMs) {
+    const now = Date.now();
+    const last = rateLimits.get(key);
+    if (last && (now - last) < cooldownMs) {
+        const remainSec = Math.ceil((cooldownMs - (now - last)) / 1000);
+        return { limited: true, remainSec };
+    }
+    rateLimits.set(key, now);
+    return { limited: false };
+}
+
+// Cleanup stale rate limit entries every 5 minutes
+setInterval(() => {
+    const cutoff = Date.now() - 60000;
+    for (const [key, ts] of rateLimits) {
+        if (ts < cutoff) rateLimits.delete(key);
+    }
+}, 300000);
+
 // ─── Helper Functions ───
-function hashPassword(pw) {
+
+// FIX #5: Password hashing with bcrypt (backward compatible with SHA-256)
+function hashPasswordLegacy(pw) {
     return crypto.createHash('sha256').update(pw).digest('hex');
+}
+
+function hashPassword(pw) {
+    return bcrypt.hashSync(pw, 10);
+}
+
+function verifyPassword(pw, hash) {
+    // Check if hash is bcrypt format (starts with $2)
+    if (hash.startsWith('$2')) {
+        return bcrypt.compareSync(pw, hash);
+    }
+    // Legacy SHA-256 check
+    return hash === hashPasswordLegacy(pw);
+}
+
+// FIX #1: Sanitize character name - strip HTML, enforce rules
+function sanitizeName(name) {
+    if (typeof name !== 'string') return '';
+    // Strip all HTML tags
+    let clean = name.replace(/<[^>]*>/g, '');
+    // Trim whitespace
+    clean = clean.trim();
+    // Only allow alphanumeric, spaces, underscores, dashes
+    clean = clean.replace(/[^a-zA-Z0-9 _-]/g, '');
+    // Collapse multiple spaces
+    clean = clean.replace(/\s+/g, ' ').trim();
+    // Enforce length limits
+    clean = clean.substring(0, 20);
+    return clean;
 }
 
 function xpForLevel(level) {
@@ -63,14 +157,28 @@ function getCharWithEquipBonus(charId) {
         bonusDef += e.def_bonus;
         bonusHp += e.hp_bonus;
     }
+
+    // FIX #2: Include active buffs (cleanup expired first)
+    const now = new Date().toISOString();
+    db.prepare('DELETE FROM active_buffs WHERE expires_at <= ?').run(now);
+    const activeBuffs = db.prepare('SELECT buff_type, value, expires_at FROM active_buffs WHERE character_id = ? AND expires_at > ?').all(charId, now);
+    let buffAtk = 0, buffDef = 0;
+    for (const buff of activeBuffs) {
+        if (buff.buff_type === 'atk') buffAtk += buff.value;
+        if (buff.buff_type === 'def') buffDef += buff.value;
+    }
+
     return {
         ...char,
-        total_atk: char.atk + bonusAtk,
-        total_def: char.def + bonusDef,
+        total_atk: char.atk + bonusAtk + buffAtk,
+        total_def: char.def + bonusDef + buffDef,
         total_max_hp: char.max_hp + bonusHp,
         bonus_atk: bonusAtk,
         bonus_def: bonusDef,
-        bonus_hp: bonusHp
+        bonus_hp: bonusHp,
+        buff_atk: buffAtk,
+        buff_def: buffDef,
+        active_buffs: activeBuffs
     };
 }
 
@@ -109,6 +217,11 @@ app.post('/api/register', (req, res) => {
     if (username.length < 3 || username.length > 20) return res.json({ error: 'Username must be 3-20 characters' });
     if (password.length < 4) return res.json({ error: 'Password must be at least 4 characters' });
 
+    // FIX #6: Rate limit registration (1 per 10 seconds per IP)
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    const rl = checkRateLimit('register:' + ip, 10000);
+    if (rl.limited) return res.json({ error: `Please wait ${rl.remainSec}s before registering again.` });
+
     const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
     if (existing) return res.json({ error: 'Username already taken' });
 
@@ -124,9 +237,18 @@ app.post('/api/login', (req, res) => {
     if (!username || !password) return res.json({ error: 'Username and password required' });
 
     const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-    if (!user || user.password_hash !== hashPassword(password)) {
+    if (!user) return res.json({ error: 'Invalid username or password' });
+
+    // FIX #5: Verify password with bcrypt/legacy support, re-hash if legacy
+    if (!verifyPassword(password, user.password_hash)) {
         return res.json({ error: 'Invalid username or password' });
     }
+    // If legacy hash, upgrade to bcrypt
+    if (!user.password_hash.startsWith('$2')) {
+        const newHash = hashPassword(password);
+        db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newHash, user.id);
+    }
+
     req.session.userId = user.id;
     req.session.username = username;
     res.json({ success: true, userId: user.id });
@@ -150,6 +272,11 @@ app.post('/api/character/create', (req, res) => {
     if (!name || !charClass) return res.json({ error: 'Name and class required' });
     if (!['Warrior', 'Mage', 'Archer'].includes(charClass)) return res.json({ error: 'Invalid class' });
 
+    // FIX #1: Sanitize character name
+    const cleanName = sanitizeName(name);
+    if (cleanName.length < 2) return res.json({ error: 'Character name must be at least 2 characters (alphanumeric, spaces, underscores, dashes only)' });
+    if (cleanName.length > 20) return res.json({ error: 'Character name must be 20 characters or less' });
+
     const existing = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
     if (existing) return res.json({ error: 'You already have a character' });
 
@@ -160,7 +287,7 @@ app.post('/api/character/create', (req, res) => {
 
     const result = db.prepare(
         'INSERT INTO characters (user_id, name, class, hp, max_hp, atk, def) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(req.session.userId, name, charClass, hp, hp, atk, def);
+    ).run(req.session.userId, cleanName, charClass, hp, hp, atk, def);
 
     // Give starter items
     const starterWeapon = charClass === 'Mage' ? 7 : charClass === 'Archer' ? 8 : 1;
@@ -184,6 +311,11 @@ app.get('/api/character', (req, res) => {
 // ─── HUNT ROUTE ───
 app.post('/api/hunt', (req, res) => {
     if (!req.session.userId) return res.json({ error: 'Not logged in' });
+
+    // FIX #6: Rate limit hunt (3 seconds)
+    const rl = checkRateLimit('hunt:' + req.session.userId, 3000);
+    if (rl.limited) return res.json({ error: `Please wait ${rl.remainSec}s before hunting again.` });
+
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
     if (!charRow) return res.json({ error: 'No character' });
     const char = getCharWithEquipBonus(charRow.id);
@@ -250,7 +382,15 @@ app.post('/api/hunt', (req, res) => {
         const newXp = char.xp + xpGained;
         const newGold = char.gold + goldGained;
         const newHp = Math.max(1, playerHp);
-        db.prepare('UPDATE characters SET xp = ?, gold = ?, hp = ? WHERE id = ?').run(newXp, newGold, newHp, char.id);
+        db.prepare('UPDATE characters SET xp = ?, gold = ?, hp = ?, total_gold_earned = total_gold_earned + ? WHERE id = ?').run(newXp, newGold, newHp, goldGained, char.id);
+
+        // Track monster kill
+        const existingStat = db.prepare('SELECT * FROM player_stats WHERE character_id = ? AND monster_name = ?').get(char.id, monster.name);
+        if (existingStat) {
+            db.prepare('UPDATE player_stats SET kill_count = kill_count + 1 WHERE id = ?').run(existingStat.id);
+        } else {
+            db.prepare('INSERT INTO player_stats (character_id, monster_name, kill_count) VALUES (?, ?, 1)').run(char.id, monster.name);
+        }
 
         // Check level up
         const updatedChar = db.prepare('SELECT * FROM characters WHERE id = ?').get(char.id);
@@ -300,11 +440,17 @@ app.post('/api/inventory/equip', (req, res) => {
     if (!invItem) return res.json({ error: 'Item not found' });
     if (invItem.type === 'material' || invItem.type === 'potion') return res.json({ error: 'Cannot equip this item type' });
 
-    // Unequip same-type items
+    // FIX #9: Rewrite equip logic - check current state, then unequip all same type, then equip if needed
+    const wasEquipped = invItem.equipped === 1;
+
+    // Step 1: Unequip ALL items of the same type
     db.prepare(`UPDATE inventory SET equipped = 0 WHERE character_id = ? AND item_id IN (SELECT id FROM items WHERE type = ?)`)
         .run(char.id, invItem.type);
-    // Equip
-    db.prepare('UPDATE inventory SET equipped = ? WHERE id = ?').run(invItem.equipped ? 0 : 1, invId);
+
+    // Step 2: If the item was NOT equipped before, equip it now (fresh state read)
+    if (!wasEquipped) {
+        db.prepare('UPDATE inventory SET equipped = 1 WHERE id = ?').run(invId);
+    }
 
     res.json({ success: true });
 });
@@ -320,8 +466,27 @@ app.post('/api/inventory/use', (req, res) => {
     if (invItem.type !== 'potion') return res.json({ error: 'Can only use potions' });
 
     const char = db.prepare('SELECT * FROM characters WHERE id = ?').get(charRow.id);
-    const newHp = Math.min(char.max_hp, char.hp + invItem.hp_bonus);
-    db.prepare('UPDATE characters SET hp = ? WHERE id = ?').run(newHp, char.id);
+    let message = '';
+
+    // FIX #2: Handle ATK/DEF boost potions with temporary buff system
+    if (invItem.atk_bonus > 0 && invItem.hp_bonus === 0) {
+        // ATK Boost Potion - apply 5-minute buff
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+        db.prepare('INSERT INTO active_buffs (character_id, buff_type, value, expires_at) VALUES (?, ?, ?, ?)')
+            .run(charRow.id, 'atk', invItem.atk_bonus, expiresAt);
+        message = `ATK Boost +${invItem.atk_bonus} for 5 minutes!`;
+    } else if (invItem.def_bonus > 0 && invItem.hp_bonus === 0) {
+        // DEF Boost Potion - apply 5-minute buff
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+        db.prepare('INSERT INTO active_buffs (character_id, buff_type, value, expires_at) VALUES (?, ?, ?, ?)')
+            .run(charRow.id, 'def', invItem.def_bonus, expiresAt);
+        message = `DEF Boost +${invItem.def_bonus} for 5 minutes!`;
+    } else {
+        // HP Potion - heal
+        const newHp = Math.min(char.max_hp, char.hp + invItem.hp_bonus);
+        db.prepare('UPDATE characters SET hp = ? WHERE id = ?').run(newHp, char.id);
+        message = `Healed ${invItem.hp_bonus} HP!`;
+    }
 
     // Decrease quantity
     if (invItem.quantity > 1) {
@@ -332,12 +497,12 @@ app.post('/api/inventory/use', (req, res) => {
 
     const finalChar = getCharWithEquipBonus(char.id);
     finalChar.xp_needed = xpForLevel(finalChar.level);
-    res.json({ success: true, healed: invItem.hp_bonus, character: finalChar });
+    res.json({ success: true, message, healed: invItem.hp_bonus, character: finalChar });
 });
 
 // ─── SHOP ROUTES ───
 app.get('/api/shop', (req, res) => {
-    const items = db.prepare('SELECT * FROM items WHERE type IN ("weapon","armor","potion") ORDER BY type, price').all();
+    const items = db.prepare("SELECT * FROM items WHERE type IN ('weapon','armor','potion') ORDER BY type, price").all();
     res.json(items);
 });
 
@@ -488,8 +653,8 @@ app.post('/api/dungeon/enter', (req, res) => {
     const won = playerHp > 0 && bossDefeated;
 
     if (won) {
-        db.prepare('UPDATE characters SET xp = xp + ?, gold = gold + ?, hp = ? WHERE id = ?')
-            .run(totalXp, totalGold, Math.max(1, playerHp), char.id);
+        db.prepare('UPDATE characters SET xp = xp + ?, gold = gold + ?, hp = ?, total_gold_earned = total_gold_earned + ? WHERE id = ?')
+            .run(totalXp, totalGold, Math.max(1, playerHp), totalGold, char.id);
     } else {
         db.prepare('UPDATE characters SET hp = ? WHERE id = ?')
             .run(Math.max(1, Math.floor(char.max_hp * 0.2)), char.id);
@@ -504,6 +669,7 @@ app.post('/api/dungeon/enter', (req, res) => {
         won,
         dungeon: dungeon.name,
         bossName: dungeon.boss_name,
+        bossHp: dungeon.boss_hp,
         bossDefeated,
         log: allLog,
         xpGained: totalXp,
@@ -590,9 +756,87 @@ app.post('/api/craft', (req, res) => {
     res.json({ success: true, message: `Crafted ${resultItem.name}!`, item: resultItem });
 });
 
+// ─── DAILY REWARD ───
+app.post('/api/daily-reward', (req, res) => {
+    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    const charRow = db.prepare('SELECT * FROM characters WHERE user_id = ?').get(req.session.userId);
+    if (!charRow) return res.json({ error: 'No character' });
+
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    if (charRow.last_daily === todayStr) {
+        return res.json({ error: 'You already claimed your daily reward today! Come back tomorrow.' });
+    }
+
+    // Check streak
+    let streak = charRow.daily_streak || 0;
+    if (charRow.last_daily) {
+        const lastDate = new Date(charRow.last_daily);
+        const diffDays = Math.floor((now - lastDate) / (1000 * 60 * 60 * 24));
+        if (diffDays === 1) {
+            streak += 1; // consecutive day
+        } else if (diffDays > 1) {
+            streak = 1; // streak broken
+        }
+    } else {
+        streak = 1; // first daily ever
+    }
+
+    // Rewards scale with streak (capped at 30)
+    const cappedStreak = Math.min(streak, 30);
+    const goldReward = 50 + (cappedStreak * 10);
+    const xpReward = 20 + (cappedStreak * 5);
+
+    db.prepare('UPDATE characters SET gold = gold + ?, xp = xp + ?, last_daily = ?, daily_streak = ? WHERE id = ?')
+        .run(goldReward, xpReward, todayStr, streak, charRow.id);
+
+    // Track total gold earned
+    db.prepare('UPDATE characters SET total_gold_earned = total_gold_earned + ? WHERE id = ?').run(goldReward, charRow.id);
+
+    // Check level up
+    const updatedChar = db.prepare('SELECT * FROM characters WHERE id = ?').get(charRow.id);
+    const levelUps = checkLevelUp(updatedChar);
+    const finalChar = getCharWithEquipBonus(charRow.id);
+    finalChar.xp_needed = xpForLevel(finalChar.level);
+
+    res.json({
+        success: true,
+        goldReward,
+        xpReward,
+        streak,
+        levelUps,
+        character: finalChar
+    });
+});
+
+// ─── PLAYER STATS ───
+app.get('/api/stats', (req, res) => {
+    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    const charRow = db.prepare('SELECT * FROM characters WHERE user_id = ?').get(req.session.userId);
+    if (!charRow) return res.json({ error: 'No character' });
+
+    const killStats = db.prepare('SELECT monster_name, kill_count FROM player_stats WHERE character_id = ? ORDER BY kill_count DESC')
+        .all(charRow.id);
+
+    const totalKills = killStats.reduce((sum, s) => sum + s.kill_count, 0);
+
+    res.json({
+        totalKills,
+        totalGoldEarned: charRow.total_gold_earned || 0,
+        dailyStreak: charRow.daily_streak || 0,
+        kills: killStats
+    });
+});
+
 // ─── REST (heal) ───
 app.post('/api/rest', (req, res) => {
     if (!req.session.userId) return res.json({ error: 'Not logged in' });
+
+    // FIX #6: Rate limit rest (30 seconds)
+    const rl = checkRateLimit('rest:' + req.session.userId, 30000);
+    if (rl.limited) return res.json({ error: `Please wait ${rl.remainSec}s before resting again.` });
+
     const charRow = db.prepare('SELECT * FROM characters WHERE user_id = ?').get(req.session.userId);
     if (!charRow) return res.json({ error: 'No character' });
 
@@ -657,7 +901,7 @@ app.post('/api/pvp/duel', (req, res) => {
     const xpReward = Math.floor(10 + defender.level * 3);
 
     if (won) {
-        db.prepare('UPDATE characters SET gold = gold + ?, xp = xp + ? WHERE id = ?').run(goldStake, xpReward, attacker.id);
+        db.prepare('UPDATE characters SET gold = gold + ?, xp = xp + ?, total_gold_earned = total_gold_earned + ? WHERE id = ?').run(goldStake, xpReward, goldStake, attacker.id);
         db.prepare('UPDATE characters SET gold = gold - ? WHERE id = ?').run(goldStake, defender.id);
         const updChar = db.prepare('SELECT * FROM characters WHERE id = ?').get(attacker.id);
         checkLevelUp(updChar);
