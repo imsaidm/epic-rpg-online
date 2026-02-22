@@ -213,9 +213,9 @@ const onlinePlayers = new Map(); // socketId -> { charId, charName, userId }
 // ─── AUTH ROUTES ───
 app.post('/api/register', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.json({ error: 'Username and password required' });
-    if (username.length < 3 || username.length > 20) return res.json({ error: 'Username must be 3-20 characters' });
-    if (password.length < 4) return res.json({ error: 'Password must be at least 4 characters' });
+    if (!username || !password) return res.json({ error: 'Username and password are required.' });
+    if (username.length < 3 || username.length > 20) return res.json({ error: 'Username must be between 3 and 20 characters.' });
+    if (password.length < 4) return res.json({ error: 'Password must be at least 4 characters long.' });
 
     // FIX #6: Rate limit registration (1 per 10 seconds per IP)
     const ip = req.ip || req.connection.remoteAddress || 'unknown';
@@ -223,7 +223,7 @@ app.post('/api/register', (req, res) => {
     if (rl.limited) return res.json({ error: `Please wait ${rl.remainSec}s before registering again.` });
 
     const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
-    if (existing) return res.json({ error: 'Username already taken' });
+    if (existing) return res.json({ error: 'Username is already taken.' });
 
     const hash = hashPassword(password);
     const result = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(username, hash);
@@ -234,14 +234,14 @@ app.post('/api/register', (req, res) => {
 
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
-    if (!username || !password) return res.json({ error: 'Username and password required' });
+    if (!username || !password) return res.json({ error: 'Username and password are required.' });
 
     const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-    if (!user) return res.json({ error: 'Invalid username or password' });
+    if (!user) return res.json({ error: 'Invalid username or password.' });
 
     // FIX #5: Verify password with bcrypt/legacy support, re-hash if legacy
     if (!verifyPassword(password, user.password_hash)) {
-        return res.json({ error: 'Invalid username or password' });
+        return res.json({ error: 'Invalid username or password.' });
     }
     // If legacy hash, upgrade to bcrypt
     if (!user.password_hash.startsWith('$2')) {
@@ -267,10 +267,10 @@ app.get('/api/me', (req, res) => {
 
 // ─── CHARACTER ROUTES ───
 app.post('/api/character/create', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const { name, charClass } = req.body;
-    if (!name || !charClass) return res.json({ error: 'Name and class required' });
-    if (!['Warrior', 'Mage', 'Archer'].includes(charClass)) return res.json({ error: 'Invalid class' });
+    if (!name || !charClass) return res.json({ error: 'Name and class are required.' });
+    if (!['Warrior', 'Mage', 'Archer'].includes(charClass)) return res.json({ error: 'Invalid class selected.' });
 
     // FIX #1: Sanitize character name
     const cleanName = sanitizeName(name);
@@ -278,7 +278,11 @@ app.post('/api/character/create', (req, res) => {
     if (cleanName.length > 20) return res.json({ error: 'Character name must be 20 characters or less' });
 
     const existing = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (existing) return res.json({ error: 'You already have a character' });
+    if (existing) return res.json({ error: 'You already have a character.' });
+
+    // FIX #6: Check for duplicate character names (case-insensitive)
+    const nameTaken = db.prepare('SELECT id FROM characters WHERE LOWER(name) = LOWER(?)').get(cleanName);
+    if (nameTaken) return res.json({ error: 'Character name is already taken. Please choose a different name.' });
 
     let hp = 100, atk = 10, def = 5;
     if (charClass === 'Warrior') { hp = 120; atk = 12; def = 8; }
@@ -299,7 +303,7 @@ app.post('/api/character/create', (req, res) => {
 });
 
 app.get('/api/character', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const char = getCharWithEquipBonus(
         db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId)?.id
     );
@@ -310,14 +314,14 @@ app.get('/api/character', (req, res) => {
 
 // ─── HUNT ROUTE ───
 app.post('/api/hunt', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
 
-    // FIX #6: Rate limit hunt (3 seconds)
+    // Server-side hunt cooldown (3 seconds) - FIX #1 from QC-2
     const rl = checkRateLimit('hunt:' + req.session.userId, 3000);
-    if (rl.limited) return res.json({ error: `Please wait ${rl.remainSec}s before hunting again.` });
+    if (rl.limited) return res.json({ error: `Hunt is on cooldown. Please wait ${rl.remainSec}s.` });
 
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const char = getCharWithEquipBonus(charRow.id);
 
     // Pick random monster near player level
@@ -395,6 +399,9 @@ app.post('/api/hunt', (req, res) => {
         // Check level up
         const updatedChar = db.prepare('SELECT * FROM characters WHERE id = ?').get(char.id);
         levelUps = checkLevelUp(updatedChar);
+
+        // Progress quest: hunt
+        progressQuest(char.id, 'hunt');
     } else {
         // Lost — lose some HP but don't die
         db.prepare('UPDATE characters SET hp = ? WHERE id = ?').run(Math.max(1, Math.floor(char.max_hp * 0.3)), char.id);
@@ -417,9 +424,9 @@ app.post('/api/hunt', (req, res) => {
 
 // ─── INVENTORY ROUTE ───
 app.get('/api/inventory', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const char = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!char) return res.json({ error: 'No character' });
+    if (!char) return res.json({ error: 'No character found.' });
 
     const inv = db.prepare(`
         SELECT inv.id as inv_id, inv.quantity, inv.equipped, i.*
@@ -431,14 +438,14 @@ app.get('/api/inventory', (req, res) => {
 });
 
 app.post('/api/inventory/equip', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const char = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!char) return res.json({ error: 'No character' });
+    if (!char) return res.json({ error: 'No character found.' });
     const { invId } = req.body;
 
     const invItem = db.prepare(`SELECT inv.*, i.type FROM inventory inv JOIN items i ON inv.item_id = i.id WHERE inv.id = ? AND inv.character_id = ?`).get(invId, char.id);
-    if (!invItem) return res.json({ error: 'Item not found' });
-    if (invItem.type === 'material' || invItem.type === 'potion') return res.json({ error: 'Cannot equip this item type' });
+    if (!invItem) return res.json({ error: 'Item not found.' });
+    if (invItem.type === 'material' || invItem.type === 'potion') return res.json({ error: 'This item type cannot be equipped.' });
 
     // FIX #9: Rewrite equip logic - check current state, then unequip all same type, then equip if needed
     const wasEquipped = invItem.equipped === 1;
@@ -456,14 +463,14 @@ app.post('/api/inventory/equip', (req, res) => {
 });
 
 app.post('/api/inventory/use', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const { invId } = req.body;
 
     const invItem = db.prepare(`SELECT inv.*, i.* FROM inventory inv JOIN items i ON inv.item_id = i.id WHERE inv.id = ? AND inv.character_id = ?`).get(invId, charRow.id);
-    if (!invItem) return res.json({ error: 'Item not found' });
-    if (invItem.type !== 'potion') return res.json({ error: 'Can only use potions' });
+    if (!invItem) return res.json({ error: 'Item not found.' });
+    if (invItem.type !== 'potion') return res.json({ error: 'Only potions can be used.' });
 
     const char = db.prepare('SELECT * FROM characters WHERE id = ?').get(charRow.id);
     let message = '';
@@ -507,16 +514,16 @@ app.get('/api/shop', (req, res) => {
 });
 
 app.post('/api/shop/buy', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const { itemId } = req.body;
 
     const item = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId);
-    if (!item) return res.json({ error: 'Item not found' });
+    if (!item) return res.json({ error: 'Item not found.' });
 
     const char = db.prepare('SELECT * FROM characters WHERE id = ?').get(charRow.id);
-    if (char.gold < item.price) return res.json({ error: 'Not enough gold!' });
+    if (char.gold < item.price) return res.json({ error: 'Not enough gold.' });
 
     db.prepare('UPDATE characters SET gold = gold - ? WHERE id = ?').run(item.price, char.id);
 
@@ -531,13 +538,13 @@ app.post('/api/shop/buy', (req, res) => {
 });
 
 app.post('/api/shop/sell', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const { invId } = req.body;
 
     const invItem = db.prepare(`SELECT inv.*, i.price, i.name FROM inventory inv JOIN items i ON inv.item_id = i.id WHERE inv.id = ? AND inv.character_id = ?`).get(invId, charRow.id);
-    if (!invItem) return res.json({ error: 'Item not found' });
+    if (!invItem) return res.json({ error: 'Item not found.' });
 
     const sellPrice = Math.floor(invItem.price * 0.5);
 
@@ -553,20 +560,20 @@ app.post('/api/shop/sell', (req, res) => {
 
 // ─── DUNGEON / ADVENTURE ROUTES ───
 app.get('/api/dungeons', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const dungeons = db.prepare('SELECT * FROM dungeons ORDER BY level_req').all();
     res.json(dungeons);
 });
 
 app.post('/api/dungeon/enter', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const char = getCharWithEquipBonus(charRow.id);
     const { dungeonId } = req.body;
 
     const dungeon = db.prepare('SELECT * FROM dungeons WHERE id = ?').get(dungeonId);
-    if (!dungeon) return res.json({ error: 'Dungeon not found' });
+    if (!dungeon) return res.json({ error: 'Dungeon not found.' });
     if (char.level < dungeon.level_req) return res.json({ error: `Requires level ${dungeon.level_req}! You are level ${char.level}.` });
 
     // Mini monsters before boss (2-3 encounters)
@@ -655,6 +662,9 @@ app.post('/api/dungeon/enter', (req, res) => {
     if (won) {
         db.prepare('UPDATE characters SET xp = xp + ?, gold = gold + ?, hp = ?, total_gold_earned = total_gold_earned + ? WHERE id = ?')
             .run(totalXp, totalGold, Math.max(1, playerHp), totalGold, char.id);
+
+        // Progress quest: dungeon
+        progressQuest(char.id, 'dungeon');
     } else {
         db.prepare('UPDATE characters SET hp = ? WHERE id = ?')
             .run(Math.max(1, Math.floor(char.max_hp * 0.2)), char.id);
@@ -682,7 +692,7 @@ app.post('/api/dungeon/enter', (req, res) => {
 
 // ─── CRAFTING ROUTES ───
 app.get('/api/recipes', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const recipes = db.prepare(`
         SELECT cr.*, 
             r.name as result_name, r.type as result_type, r.rarity as result_rarity,
@@ -698,13 +708,13 @@ app.get('/api/recipes', (req, res) => {
 });
 
 app.post('/api/craft', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const { recipeId } = req.body;
 
     const recipe = db.prepare('SELECT * FROM craft_recipes WHERE id = ?').get(recipeId);
-    if (!recipe) return res.json({ error: 'Recipe not found' });
+    if (!recipe) return res.json({ error: 'Recipe not found.' });
 
     // Check ingredients
     const ing1 = db.prepare('SELECT * FROM inventory WHERE character_id = ? AND item_id = ?').get(charRow.id, recipe.ingredient1_id);
@@ -758,15 +768,17 @@ app.post('/api/craft', (req, res) => {
 
 // ─── DAILY REWARD ───
 app.post('/api/daily-reward', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT * FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
 
+    // FIX #3: Use WIB (Asia/Jakarta) timezone instead of UTC
     const now = new Date();
-    const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+    const wibFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const todayStr = wibFormatter.format(now); // YYYY-MM-DD in WIB
 
     if (charRow.last_daily === todayStr) {
-        return res.json({ error: 'You already claimed your daily reward today! Come back tomorrow.' });
+        return res.json({ error: 'Daily reward already claimed today. Come back tomorrow!' });
     }
 
     // Check streak
@@ -812,9 +824,9 @@ app.post('/api/daily-reward', (req, res) => {
 
 // ─── PLAYER STATS ───
 app.get('/api/stats', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT * FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
 
     const killStats = db.prepare('SELECT monster_name, kill_count FROM player_stats WHERE character_id = ? ORDER BY kill_count DESC')
         .all(charRow.id);
@@ -831,14 +843,14 @@ app.get('/api/stats', (req, res) => {
 
 // ─── REST (heal) ───
 app.post('/api/rest', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
 
-    // FIX #6: Rate limit rest (30 seconds)
+    // Server-side rest cooldown (30 seconds) - FIX #2 from QC-2
     const rl = checkRateLimit('rest:' + req.session.userId, 30000);
-    if (rl.limited) return res.json({ error: `Please wait ${rl.remainSec}s before resting again.` });
+    if (rl.limited) return res.json({ error: `Rest is on cooldown. Please wait ${rl.remainSec}s.` });
 
     const charRow = db.prepare('SELECT * FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
 
     const cost = Math.floor(charRow.level * 2);
     if (charRow.gold < cost) return res.json({ error: `Not enough gold! Need ${cost}G to rest.` });
@@ -861,23 +873,23 @@ app.get('/api/players/online', (req, res) => {
 
 // ─── PVP ───
 app.post('/api/pvp/duel', (req, res) => {
-    if (!req.session.userId) return res.json({ error: 'Not logged in' });
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
     const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
-    if (!charRow) return res.json({ error: 'No character' });
+    if (!charRow) return res.json({ error: 'No character found.' });
     const { targetCharId } = req.body;
-    if (!targetCharId) return res.json({ error: 'Select an opponent' });
-    if (targetCharId === charRow.id) return res.json({ error: "You can't duel yourself!" });
+    if (!targetCharId) return res.json({ error: 'Please select an opponent.' });
+    if (targetCharId === charRow.id) return res.json({ error: "You cannot duel yourself." });
 
     const attacker = getCharWithEquipBonus(charRow.id);
     const defender = getCharWithEquipBonus(targetCharId);
-    if (!defender) return res.json({ error: 'Opponent not found' });
+    if (!defender) return res.json({ error: 'Opponent not found.' });
 
     // Check if defender is online
     let defenderOnline = false;
     for (const [, p] of onlinePlayers) {
         if (p.charId === targetCharId) { defenderOnline = true; break; }
     }
-    if (!defenderOnline) return res.json({ error: 'Opponent is not online!' });
+    if (!defenderOnline) return res.json({ error: 'Opponent is not online.' });
 
     const log = [];
     let aHp = attacker.total_max_hp;
@@ -902,11 +914,16 @@ app.post('/api/pvp/duel', (req, res) => {
 
     if (won) {
         db.prepare('UPDATE characters SET gold = gold + ?, xp = xp + ?, total_gold_earned = total_gold_earned + ? WHERE id = ?').run(goldStake, xpReward, goldStake, attacker.id);
-        db.prepare('UPDATE characters SET gold = gold - ? WHERE id = ?').run(goldStake, defender.id);
+        // FIX #4: Prevent gold from going negative - clamp to minimum 0
+        db.prepare('UPDATE characters SET gold = MAX(0, gold - ?) WHERE id = ?').run(goldStake, defender.id);
         const updChar = db.prepare('SELECT * FROM characters WHERE id = ?').get(attacker.id);
         checkLevelUp(updChar);
+
+        // Progress quest: pvp_win
+        progressQuest(attacker.id, 'pvp_win');
     } else {
-        db.prepare('UPDATE characters SET gold = gold - ? WHERE id = ?').run(goldStake, attacker.id);
+        // FIX #4: Prevent gold from going negative - clamp to minimum 0
+        db.prepare('UPDATE characters SET gold = MAX(0, gold - ?) WHERE id = ?').run(goldStake, attacker.id);
         db.prepare('UPDATE characters SET gold = gold + ? WHERE id = ?').run(goldStake, defender.id);
     }
 
@@ -979,6 +996,130 @@ function broadcastOnlinePlayers() {
     }
     io.emit('online-players', players);
 }
+
+// ─── QUEST / DAILY MISSION SYSTEM ───
+
+// Create quest tracking table
+db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_quests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id INTEGER NOT NULL,
+        quest_type TEXT NOT NULL,
+        quest_desc TEXT NOT NULL,
+        target_count INTEGER NOT NULL DEFAULT 1,
+        current_count INTEGER NOT NULL DEFAULT 0,
+        reward_xp INTEGER NOT NULL DEFAULT 0,
+        reward_gold INTEGER NOT NULL DEFAULT 0,
+        completed INTEGER NOT NULL DEFAULT 0,
+        claimed INTEGER NOT NULL DEFAULT 0,
+        quest_date TEXT NOT NULL,
+        FOREIGN KEY (character_id) REFERENCES characters(id)
+    )
+`);
+
+// Add tutorial_seen column
+try {
+    db.prepare("SELECT tutorial_seen FROM characters LIMIT 1").get();
+} catch (e) {
+    db.exec("ALTER TABLE characters ADD COLUMN tutorial_seen INTEGER DEFAULT 0");
+}
+
+// Helper: get today's date in WIB
+function getTodayWIB() {
+    const now = new Date();
+    const wibFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' });
+    return wibFormatter.format(now);
+}
+
+// Generate daily quests for a character
+function generateDailyQuests(charId) {
+    const today = getTodayWIB();
+    const existing = db.prepare('SELECT id FROM daily_quests WHERE character_id = ? AND quest_date = ?').all(charId, today);
+    if (existing.length > 0) return; // already generated today
+
+    const char = db.prepare('SELECT level FROM characters WHERE id = ?').get(charId);
+    const level = char ? char.level : 1;
+
+    const quests = [
+        { type: 'hunt', desc: 'Hunt 5 monsters', target: 5, xp: 30 + level * 5, gold: 20 + level * 3 },
+        { type: 'pvp_win', desc: 'Win 1 PvP duel', target: 1, xp: 50 + level * 8, gold: 30 + level * 5 },
+        { type: 'dungeon', desc: 'Clear 1 dungeon', target: 1, xp: 60 + level * 10, gold: 40 + level * 6 }
+    ];
+
+    const insertStmt = db.prepare('INSERT INTO daily_quests (character_id, quest_type, quest_desc, target_count, reward_xp, reward_gold, quest_date) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    for (const q of quests) {
+        insertStmt.run(charId, q.type, q.desc, q.target, q.xp, q.gold, today);
+    }
+}
+
+// Progress a quest
+function progressQuest(charId, questType) {
+    const today = getTodayWIB();
+    db.prepare('UPDATE daily_quests SET current_count = MIN(current_count + 1, target_count) WHERE character_id = ? AND quest_type = ? AND quest_date = ? AND completed = 0')
+        .run(charId, questType, today);
+    // Auto-mark completed
+    db.prepare('UPDATE daily_quests SET completed = 1 WHERE character_id = ? AND quest_date = ? AND current_count >= target_count AND completed = 0')
+        .run(charId, today);
+}
+
+// GET quests
+app.get('/api/quests', (req, res) => {
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
+    const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
+    if (!charRow) return res.json({ error: 'No character found.' });
+
+    generateDailyQuests(charRow.id);
+    const today = getTodayWIB();
+    const quests = db.prepare('SELECT * FROM daily_quests WHERE character_id = ? AND quest_date = ?').all(charRow.id, today);
+    res.json(quests);
+});
+
+// Claim quest reward
+app.post('/api/quests/claim', (req, res) => {
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
+    const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
+    if (!charRow) return res.json({ error: 'No character found.' });
+    const { questId } = req.body;
+
+    const quest = db.prepare('SELECT * FROM daily_quests WHERE id = ? AND character_id = ?').get(questId, charRow.id);
+    if (!quest) return res.json({ error: 'Quest not found.' });
+    if (!quest.completed) return res.json({ error: 'Quest is not yet completed.' });
+    if (quest.claimed) return res.json({ error: 'Quest reward already claimed.' });
+
+    db.prepare('UPDATE daily_quests SET claimed = 1 WHERE id = ?').run(questId);
+    db.prepare('UPDATE characters SET xp = xp + ?, gold = gold + ?, total_gold_earned = total_gold_earned + ? WHERE id = ?')
+        .run(quest.reward_xp, quest.reward_gold, quest.reward_gold, charRow.id);
+
+    const updatedChar = db.prepare('SELECT * FROM characters WHERE id = ?').get(charRow.id);
+    const levelUps = checkLevelUp(updatedChar);
+    const finalChar = getCharWithEquipBonus(charRow.id);
+    finalChar.xp_needed = xpForLevel(finalChar.level);
+
+    res.json({
+        success: true,
+        message: `Quest complete! +${quest.reward_xp} XP +${quest.reward_gold} Gold`,
+        xpReward: quest.reward_xp,
+        goldReward: quest.reward_gold,
+        levelUps,
+        character: finalChar
+    });
+});
+
+// ─── TUTORIAL / ONBOARDING ───
+app.get('/api/tutorial/status', (req, res) => {
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
+    const charRow = db.prepare('SELECT id, tutorial_seen FROM characters WHERE user_id = ?').get(req.session.userId);
+    if (!charRow) return res.json({ error: 'No character found.' });
+    res.json({ tutorialSeen: charRow.tutorial_seen === 1 });
+});
+
+app.post('/api/tutorial/complete', (req, res) => {
+    if (!req.session.userId) return res.json({ error: 'Not logged in.' });
+    const charRow = db.prepare('SELECT id FROM characters WHERE user_id = ?').get(req.session.userId);
+    if (!charRow) return res.json({ error: 'No character found.' });
+    db.prepare('UPDATE characters SET tutorial_seen = 1 WHERE id = ?').run(charRow.id);
+    res.json({ success: true });
+});
 
 // ─── Start ───
 const PORT = 3000;
